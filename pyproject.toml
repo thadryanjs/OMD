@@ -1,0 +1,128 @@
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+authors = ["thadryanjs <thadryan@protonmail.com>"]
+name = "omd"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tool.pixi.tasks]
+# === DEVELOPMENT ===
+format-code = { cmd = ["black", "*.py"] }
+sync-notebooks = { cmd = ["jupytext", "--sync", "*.py"], depends-on = ["format-code"] }
+test = { cmd = ["pytest", "tests/", "-v"] }
+
+# === NOTEBOOK EXECUTION ===
+execute-notebook = { args = ["notebook"], cmd = [
+    "black", "{{ notebook }}.py",
+    "&&",
+    "jupytext", "--sync", "{{ notebook }}.py",
+    "&&",
+    "jupyter", "nbconvert", "--execute",
+        "{{ notebook }}.ipynb",
+        "--inplace",
+        "--ExecutePreprocessor.kernel_name=python3"
+] }
+
+export-notebook = { args = ["notebook"], depends-on = ["format-code"], cmd = [
+    "jupytext", "--sync", "{{ notebook }}.py",
+    "&&",
+    "jupyter", "nbconvert", "--execute",
+        "{{ notebook }}.ipynb",
+        "--inplace",
+        "--ExecutePreprocessor.kernel_name=python3",
+    "&&",
+    "nbdev-export"
+] }
+
+export-all = { cmd = [
+    "bash", "-c",
+    "for nb in *.ipynb; do [ -f \"$nb\" ] || continue; name=\"${nb%.ipynb}\"; echo \"Exporting $name\"; pixi run export-notebook -- notebook=\"$name\"; done"
+] }
+
+# === BUILD OUTPUTS ===
+build-readable = { cmd = [
+    "bash", "-c",
+    "OUT=outputs/readable && mkdir -p $OUT && jupyter nbconvert --to html *.ipynb --output-dir=$OUT && for md in *.md; do [ -f \"$md\" ] && pandoc \"$md\" -s -o \"$OUT/${md%.md}.html\"; done && echo \"Built readable HTML: $OUT\""
+] }
+
+build-jupyterbook = { cmd = [
+    "bash", "-c",
+    "rm -rf _build/html _build/logs _build/site && jupyter-book build --html --all ."
+], depends-on = ["sync-notebooks"] }
+
+# === LOCAL SYNC (FROM SERVER) ===
+local-pull-readable = { cmd = [
+    "rsync", "-avz", "--exclude='__pycache__'", "--exclude='*.pyc'",
+    "/mnt/Workspace/OMD/code/outputs/readable", "outputs/"
+] }
+
+local-pull-jupyterbook = { cmd = [
+    "rsync", "-avz", "--exclude='__pycache__'", "--exclude='*.pyc'",
+    "/mnt/Workspace/OMD/code/_build", "outputs/"
+] }
+
+clean-remote = { cmd = [
+    "rsync", "-avz", "--delete",
+    "--exclude='__pycache__'", "--exclude='*.pyc'",
+    "--exclude='.pixi'", "--exclude='*.egg-info'",
+    "--exclude='_build'",
+    "./", "/mnt/Workspace/OMD/code"
+] }
+
+# === UTILITIES ===
+create-notebook = { args = ["scriptname", "extension", "kernel"], cmd = [
+    "touch", "{{ scriptname }}.{{ extension }};",
+    "jupytext", "{{ scriptname }}.{{ extension }}",
+        "--to",  "notebook;",
+    "jupytext", "--set-formats", "ipynb,{{ extension }}:percent",
+        "{{ scriptname }}.ipynb;",
+    "jupytext", "--set-kernel", "{{ kernel }}",
+        "{{ scriptname }}.{{ extension }}"
+] }
+
+match-toc-to-dir = { cmd = [ "./scripts/match-toc-to-dir.sh" ] }
+
+archive = { args = ["filename"], cmd = [
+    "bash", "-c", "git add '{{ filename }}' && git commit -m 'archive {{ filename }}' || true",
+    "&&",
+    "python", "scripts/archive-file.py", "{{ filename }}"
+] }
+
+# === DEVELOPMENT SYNC ===
+watch = { cmd = [
+    "watchexec", "-r",
+    "rsync", "-avz", "--delete",
+    "--exclude='.pixi'", "--exclude='__pycache__'", "--exclude='*.pyc'",
+    "--exclude='.egg-info'", "--exclude='_build'",
+    "--exclude='.git'",
+    "--include='*.py'", "--include='*.md'", "--include='*.toml'",
+    "--include='*.json'", "--exclude='*'", "./", "/mnt/Workspace/OMD/code"
+] }
+
+[tool.pixi.dependencies]
+jupyter = ">=1.1.1,<2"
+jupytext = ">=1.18.1,<2"
+jupyter-book = ">=2.0.2,<3"
+python = ">=3.14.0,<3.15"
+black = ">=25.1.0,<26"
+pandas = ">=2.3.3,<3"
+numpy = ">=2.4.3,<3"
+scipy = ">=1.17.1,<2"
+ipython = ">=9.7.0,<10"
+pygments = ">=2.19.2,<3"
+pandoc = ">=3.9.0.2,<4"
+pytest = ">=9.0.2,<10"
+nbdev = ">=3.0.12,<4"
+pdbpp = ">=0.11.7,<0.12"
+
+[tool.pyright]
+pythonPath = "/home/thadryan/WorkVault/Projects/TheoryProject/OMD/code/.pixi/envs/default/bin/python"
+
+[tool.ty.rules]
+unresolved-import = "ignore"
+
+[tool.nbdev]
+user = "Thadryan"
+repo = "OMD"
+lib_path = "."
+nbs_path = "."

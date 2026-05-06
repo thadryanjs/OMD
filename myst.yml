@@ -1,0 +1,8 @@
+version: 1
+project:
+  author: "Thad"
+  title: "OMD Research"
+  toc:
+    - file: readme.md
+site:
+  template: book-theme

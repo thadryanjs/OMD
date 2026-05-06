@@ -1,0 +1,27 @@
+# Ignore all files
+*.*
+
+# But keep these specific files at any level of nestedness
+!**/*.R
+!**/*.py
+!**/*.md
+!**/*.tex
+!**/*.sh
+!**/*.yaml
+!**/*.yml
+!**/*.toml
+!**/*.lock
+!.gitignore
+
+# pixi environments
+# .pixi
+*.egg-info
+# pixi environments
+# .pixi/*
+!.pixi/config.toml
+!_log.out
+# MyST build outputs
+_build
+# pixi environments
+.pixi/*
+!.pixi/config.toml
