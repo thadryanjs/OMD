@@ -114,6 +114,7 @@ pandoc = ">=3.9.0.2,<4"
 pytest = ">=9.0.2,<10"
 nbdev = ">=3.0.12,<4"
 pdbpp = ">=0.11.7,<0.12"
+ty = ">=0.0.38,<0.0.39"
 
 [tool.pyright]
 pythonPath = "/home/thadryan/WorkVault/Projects/TheoryProject/OMD/code/.pixi/envs/default/bin/python"
