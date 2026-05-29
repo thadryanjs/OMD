@@ -261,6 +261,7 @@ def omd_loss(theta, kappa, n_states, n_actions, p_true, r_true):
     Q_star, iterations_done = value_iteration(p_theta, r_theta)
 
     loss = 0.0
+    alpha = 0.1
 
     for s in range(n_states):
         for a in range(n_actions):
@@ -268,8 +269,8 @@ def omd_loss(theta, kappa, n_states, n_actions, p_true, r_true):
             for sp in range(n_states):
                 exp_total = 0.0
                 for ap in range(n_actions):
-                    exp_total += np.exp(Q_star[sp, ap] / 0.1)
-                logsumexp_sp = 0.1 * np.log(exp_total)
+                    exp_total += np.exp(Q_star[sp, ap] / alpha)
+                logsumexp_sp = alpha * np.log(exp_total)
 
                 B_true_Q += p_true[s, a, sp] * logsumexp_sp
 
@@ -282,7 +283,7 @@ print(loss)
 
 
 # %% [code]
-def optimize(loss_fn, theta_init, kappa, n_states, n_actions, p_true, r_true, learning_rate=0.1, inner_loop_steps=100, grad_step_size = 1e-5,  max_iterations=1000):
+def optimize(loss_fn, theta_init, kappa, n_states, n_actions, p_true, r_true, learning_rate=0.1, inner_loop_steps=100, grad_step_size = 1e-5,  max_iterations=1000, print_every=20):
 
     theta = theta_init.copy()
     losses = []
@@ -305,7 +306,7 @@ def optimize(loss_fn, theta_init, kappa, n_states, n_actions, p_true, r_true, le
 
         losses.append(loss_fn(theta, kappa, n_states, n_actions, p_true, r_true))
 
-        if outer_loop % 20 == 0:
+        if print_every and outer_loop % print_every == 0:
             print(f"iter {outer_loop}: loss = {losses[-1]:.4f}, ‖θ‖ = {np.linalg.norm(theta):.4f}")
 
         if np.linalg.norm(theta) > kappa:
@@ -335,7 +336,11 @@ print(f"OMD final loss: {losses_omd[-1]:.4f}")
 
 
 # %% [code]
-def model_bellman_loss(Q, theta, kappa, n_states, n_actions, gamma=0.9, alpha=0.1):
+def model_bellman_loss(Q, theta, kappa, n_states=None, n_actions=None, gamma=0.9, alpha=0.1):
+    if n_states is None:
+        n_states = Q.shape[0]
+    if n_actions is None:
+        n_actions = Q.shape[1]
     r_theta, p_theta = theta_to_model(theta, n_states, n_actions, kappa)
     B_theta_Q = soft_bellman_opt_explicit(Q, p_theta, r_theta, gamma, alpha)
 
@@ -402,14 +407,11 @@ if kappa_sweep:
 
 # %% [code]
 def optimize_Q(loss_fn, theta, Q_init, kappa,
-               learning_rate=0.01, max_iterations=100, grad_step_size=1e-5):
+               learning_rate=0.01, max_iterations=100, grad_step_size=1e-5, print_every=None):
 
     Q = Q_init.copy()
+    n_states, n_actions = Q.shape
     losses = []
-
-    # DEBUG: initial loss
-    initial_loss = loss_fn(Q, theta, kappa, n_states, n_actions)
-    print(f"Q Start: loss = {initial_loss:.4f}")
 
     for step in range(max_iterations):
         grad = np.zeros_like(Q)
@@ -433,12 +435,11 @@ def optimize_Q(loss_fn, theta, Q_init, kappa,
         loss = loss_fn(Q, theta, kappa, n_states, n_actions)
         losses.append(loss)
 
-        # DEBUG: every 20 iterations
-        if step % 20 == 0:
+        if print_every and step % print_every == 0:
             print(f"Q step {step}: loss = {loss:.4f}")
 
-    # DEBUG: final loss
-    print(f"Q Final: loss = {losses[-1]:.4f}")
+    if print_every:
+        print(f"Q Final: loss = {losses[-1]:.4f}")
 
     return Q, losses
 
@@ -447,7 +448,7 @@ def optimize_Q(loss_fn, theta, Q_init, kappa,
 Q_init = np.zeros((n_states, n_actions))
 Q_trained, Q_losses = optimize_Q(
     model_bellman_loss, theta, Q_init, kappa,
-    learning_rate=0.01, max_iterations=100, grad_step_size=1e-5
+    learning_rate=0.01, max_iterations=100, grad_step_size=1e-5, print_every=20
 )
 
 print("\nTrained Q:")
@@ -486,7 +487,7 @@ def outer_loss(theta, kappa, p_true, r_true, learning_rate=0.01, max_iterations_
     loss = true_bellman_loss_Q(Q_trained, p_true, r_true)
     return loss
 
-def optimize_outer(loss_fn, theta_init, kappa, p_true, r_true, learning_rate=0.01, max_iterations=100):
+def optimize_outer(loss_fn, theta_init, kappa, p_true, r_true, learning_rate=0.01, max_iterations=1000, print_every=100):
     theta = theta_init.copy()
     losses = []
 
@@ -505,8 +506,17 @@ def optimize_outer(loss_fn, theta_init, kappa, p_true, r_true, learning_rate=0.0
 
         theta -= learning_rate * grad
 
+        if np.linalg.norm(theta) > kappa:
+            theta = (kappa / np.linalg.norm(theta)) * theta
+
         loss = loss_fn(theta, kappa, p_true, r_true)
         losses.append(loss)
+
+        if print_every and step % print_every == 0:
+            print(f"Outer step {step}: loss = {loss:.4f}, ‖θ‖ = {np.linalg.norm(theta):.4f}")
+
+    if print_every:
+        print(f"Outer Final: loss = {losses[-1]:.4f}, ‖θ‖ = {np.linalg.norm(theta):.4f}")
 
     return theta, losses
 
@@ -516,7 +526,7 @@ print("\n=== OMD ===")
 theta_init = np.random.randn(12)
 theta_omd, _ = optimize_outer(
     outer_loss, theta_init, kappa,
-    p_true, r_true, learning_rate=0.01, max_iterations=50
+    p_true, r_true, learning_rate=0.01, max_iterations=1000
 )
 
 # Evaluate final Q
