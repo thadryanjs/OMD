@@ -18,6 +18,15 @@
 # %% [code]
 import numpy as np
 
+
+def stable_logsumexp_alpha(values, alpha):
+    max_value = np.max(values)
+    exp_total = 0.0
+    for value in values:
+        exp_total += np.exp((value - max_value) / alpha)
+    return max_value + alpha * np.log(exp_total)
+
+
 config = {
     "seed": 1234,
     "gamma": 0.9,
@@ -33,33 +42,58 @@ config = {
     "inner_q_max_iterations": 100,
     "inner_q_print_every": 20,
     "outer_learning_rate": 0.01,
-    "outer_max_iterations": 50,
+    "outer_max_iterations": 100,
     "outer_grad_step": 1e-4,
     "outer_print_every": 5,
+    "mdp_name": "complex",  # "paper" or "complex"
+    "calibration_n_transitions": 1000,
+    "calibration_alpha": 0.1,
+    "convergence_window": 10,
+    "convergence_eps": 1e-4,
 }
 
-p_true = np.array([
-    # state 0
-    # a=0: s'=0 with prob 1.0
+p_paper = np.array([
     [[1.0, 0.0],
-    # a=1: s'=1 with prob 1.0
-    [0.0, 1.0]],
-
-    # state 1
-    # a=0: s'=0 with prob 1.0
+     [0.0, 1.0]],
     [[1.0, 0.0],
-    # a=1: s'=1 with prob 1.0
-    [0.0, 1.0]]
+     [0.0, 1.0]],
 ])
 
-r_true = np.array([
-    # state 0
-    # a0 -> 1.0, a1 -> 0.0
+r_paper = np.array([
     [1.0, 0.0],
-    # state 1
-    # a0 -> 0.0, a1 -> 2.0
-    [0.0, 2.0]
+    [0.0, 2.0],
 ])
+
+p_complex = np.array([
+    # state 0
+    [[0.7, 0.2, 0.1],
+     [0.1, 0.6, 0.3]],
+    # state 1
+    [[0.3, 0.4, 0.3],
+     [0.5, 0.1, 0.4]],
+    # state 2
+    [[0.2, 0.5, 0.3],
+     [0.4, 0.3, 0.3]],
+])
+
+r_complex = np.array([
+    [1.0, 0.0],
+    [0.5, 1.5],
+    [0.0, 2.0],
+])
+
+if config["mdp_name"] == "paper":
+    p_true = p_paper
+    r_true = r_paper
+elif config["mdp_name"] == "complex":
+    p_true = p_complex
+    r_true = r_complex
+else:
+    raise ValueError(f"Unknown mdp_name: {config['mdp_name']}")
+
+print("MDP:", config["mdp_name"])
+print("p_true shape:", p_true.shape)
+print("r_true shape:", r_true.shape)
 
 # set seed
 np.random.seed(config["seed"])
@@ -84,10 +118,7 @@ def soft_bellman_opt_explicit(Q, p, r, gamma=0.9, alpha=0.01):
         for a in range(n_actions):
             # s prime
             for sp in range(n_states):
-                exp_total = 0.0
-                for ap in range(n_actions):
-                    exp_total += np.exp(Q[sp, ap] / alpha)
-                logsumexp_sp = alpha * np.log(exp_total)
+                logsumexp_sp = stable_logsumexp_alpha(Q[sp], alpha)
                 # add the accumulated reward for each s prime
                 B_Q[s, a] += p[s, a, sp] * logsumexp_sp
             # the actual computation
@@ -144,9 +175,10 @@ def get_policy_from_Q(Q, alpha=0.01):
     pi = np.zeros((n_states, n_actions))
 
     for s in range(n_states):
+        max_value = np.max(Q[s])
         exp_Q = np.zeros(n_actions)
         for a in range(n_actions):
-            exp_Q[a] = np.exp(Q[s, a] / alpha)
+            exp_Q[a] = np.exp((Q[s, a] - max_value) / alpha)
 
         exp_total = 0.0
         for a in range(n_actions):
@@ -295,10 +327,7 @@ def omd_loss(theta, kappa, n_states, n_actions, p_true, r_true):
         for a in range(n_actions):
             B_true_Q = 0.0
             for sp in range(n_states):
-                exp_total = 0.0
-                for ap in range(n_actions):
-                    exp_total += np.exp(Q_star[sp, ap] / alpha)
-                logsumexp_sp = alpha * np.log(exp_total)
+                logsumexp_sp = stable_logsumexp_alpha(Q_star[sp], alpha)
 
                 B_true_Q += p_true[s, a, sp] * logsumexp_sp
 
@@ -639,6 +668,75 @@ def optimize_outer(theta_init, kappa, p_true, r_true,
     return theta, returns
 
 
+def find_convergence_point(J_history, window, eps):
+    """
+    Returns the first step at which J has changed by less than eps
+    for `window` consecutive steps. Falls back to the final step.
+    """
+    diffs = np.abs(np.diff(J_history))
+    for i in range(window, len(diffs)):
+        if np.all(diffs[i - window:i] < eps):
+            return i
+    return len(J_history) - 1
+
+
+def collect_calibration_transitions(theta_final, Q_star, kappa,
+                                    n_states, n_actions, n_transitions,
+                                    gamma=0.9, alpha=0.01, rng=None):
+    """
+    Freeze theta. Sample actions from the converged policy softmax(Q*(s)/alpha)
+    and next states from the learned model p_theta(s'|s,a).
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    r_theta, p_theta = theta_to_model(theta_final, n_states, n_actions, kappa)
+
+    transitions = []
+    s = rng.integers(0, n_states)
+
+    for _ in range(n_transitions):
+        q_vals = Q_star[s] / alpha
+        q_vals = q_vals - np.max(q_vals)
+        probs = np.exp(q_vals) / np.sum(np.exp(q_vals))
+        a = rng.choice(n_actions, p=probs)
+
+        sp = rng.choice(n_states, p=p_theta[s, a])
+
+        transitions.append((s, a, sp))
+        s = sp
+
+    return transitions, r_theta, p_theta
+
+
+def compute_calibration_residuals(transitions, Q_star, p_true, r_true,
+                                  gamma=0.9, alpha=0.01):
+    """
+    Nonconformity score: Q*(s,a) - B^true(Q*)(s,a)
+    """
+    B_Q = soft_bellman_opt_explicit(Q_star, p_true, r_true, gamma=gamma, alpha=alpha)
+    residuals = []
+    for (s, a, sp) in transitions:
+        residuals.append(Q_star[s, a] - B_Q[s, a])
+    return np.array(residuals)
+
+
+def compute_q_intervals(residuals, Q_star, alpha=0.1):
+    """
+    Standard split conformal quantile over scalar residuals.
+    """
+    q_lo = np.quantile(residuals, alpha / 2)
+    q_hi = np.quantile(residuals, 1 - alpha / 2)
+
+    return {
+        "lower": Q_star - q_hi,
+        "upper": Q_star - q_lo,
+        "width": q_hi - q_lo,
+        "q_lo": q_lo,
+        "q_hi": q_hi,
+    }
+
+
 # OMD experiment (IFT gradient)
 print("\n=== OMD (IFT) ===")
 theta_init = np.random.randn(theta_dim)
@@ -676,3 +774,59 @@ J_mle = expected_return(Q_mle, p_true, r_true, alpha=config["alpha"])
 
 print("MLE Return:", J_mle)
 print("OMD-IFT Return:", returns_omd[-1])
+
+# Calibration phase
+converged_at = find_convergence_point(
+    returns_omd,
+    window=config["convergence_window"],
+    eps=config["convergence_eps"],
+)
+
+transitions, r_theta_cal, p_theta_cal = collect_calibration_transitions(
+    theta_omd,
+    Q_final,
+    kappa,
+    n_states,
+    n_actions,
+    n_transitions=config["calibration_n_transitions"],
+    gamma=config["gamma"],
+    alpha=config["alpha"],
+    rng=np.random.default_rng(config["seed"] + 1),
+)
+
+residuals = compute_calibration_residuals(
+    transitions,
+    Q_final,
+    p_true,
+    r_true,
+    gamma=config["gamma"],
+    alpha=config["alpha"],
+)
+
+q_intervals = compute_q_intervals(
+    residuals,
+    Q_final,
+    alpha=config["calibration_alpha"],
+)
+
+state_labels = [f"s{s}" for s in range(n_states)]
+action_labels = [f"a{a}" for a in range(n_actions)]
+
+print("\n=== CALIBRATION DIAGNOSTICS ===")
+print(f"Converged at step: {converged_at} / {config['outer_max_iterations']}")
+print(f"Calibration transitions: {len(transitions)}")
+print(f"Residual mean: {np.mean(residuals):.4f}")
+print(f"Residual std:  {np.std(residuals):.4f}")
+print(f"Interval width (uniform): {q_intervals['width']:.4f}")
+print(f"q_lo: {q_intervals['q_lo']:.4f}  q_hi: {q_intervals['q_hi']:.4f}")
+
+print("\n=== Q INTERVALS ===")
+for s in range(n_states):
+    for a in range(n_actions):
+        lo = q_intervals["lower"][s, a]
+        hi = q_intervals["upper"][s, a]
+        q = Q_final[s, a]
+        print(f"  {state_labels[s]},{action_labels[a]}: [{lo:.3f}, {hi:.3f}]  (Q*={q:.3f})")
+
+if converged_at == config["outer_max_iterations"] - 1:
+    print("WARNING: convergence fallback — consider increasing outer_max_iterations")
