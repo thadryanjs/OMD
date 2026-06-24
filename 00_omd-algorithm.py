@@ -48,6 +48,7 @@ config = {
     "mdp_name": "complex",  # "paper" or "complex"
     "calibration_n_transitions": 1000,
     "calibration_alpha": 0.1,
+    "calibration_check_every": 10,
     "convergence_window": 10,
     "convergence_eps": 1e-4,
 }
@@ -249,9 +250,6 @@ def theta_to_model(theta, n_states, n_actions, kappa=1.0):
         [r00, r01, r10, r11,  p000, p001, p010, p011, p100, p101, p110, p111]
         │──── 4 params ────│  │──────────── 8 params ───────────────────────│
        """
-    if np.linalg.norm(theta) > kappa:
-        theta = (kappa / np.linalg.norm(theta)) * theta
-
     n_r = n_states * n_actions
     n_p = n_states * n_actions * n_states
 
@@ -636,9 +634,11 @@ def implicit_gradient(theta, kappa, p_true, r_true, grad_step_size=1e-5, gamma=0
 
 def optimize_outer(theta_init, kappa, p_true, r_true,
                    learning_rate=0.01, max_iterations=1000,
-                   grad_step_size=1e-5, print_every=100):
+                   grad_step_size=1e-5, print_every=100,
+                   checkpoint_every=None):
     theta = theta_init.copy()
     returns = []
+    checkpoints = []
 
     for step in range(max_iterations):
         grad, _, _ = implicit_gradient(
@@ -659,11 +659,22 @@ def optimize_outer(theta_init, kappa, p_true, r_true,
         J = expected_return(Q_star, p_true, r_true)
         returns.append(J)
 
+        if checkpoint_every and ((step + 1) % checkpoint_every == 0 or step == max_iterations - 1):
+            checkpoints.append({
+                "step": step + 1,
+                "theta": theta.copy(),
+                "Q": Q_star.copy(),
+                "J": J,
+            })
+
         if print_every and step % print_every == 0:
             print(f"Outer step {step}: J = {J:.4f}, ‖θ‖ = {np.linalg.norm(theta):.4f}")
 
     if print_every:
         print(f"Outer Final: J = {returns[-1]:.4f}, ‖θ‖ = {np.linalg.norm(theta):.4f}")
+
+    if checkpoint_every:
+        return theta, returns, checkpoints
 
     return theta, returns
 
@@ -740,7 +751,7 @@ def compute_q_intervals(residuals, Q_star, alpha=0.1):
 # OMD experiment (IFT gradient)
 print("\n=== OMD (IFT) ===")
 theta_init = np.random.randn(theta_dim)
-theta_omd, returns_omd = optimize_outer(
+theta_omd, returns_omd, calibration_checkpoints = optimize_outer(
     theta_init,
     kappa,
     p_true,
@@ -749,6 +760,7 @@ theta_omd, returns_omd = optimize_outer(
     max_iterations=config["outer_max_iterations"],
     grad_step_size=config["outer_grad_step"],
     print_every=config["outer_print_every"],
+    checkpoint_every=config["calibration_check_every"],
 )
 
 # Evaluate final Q from converged model via fixed point iteration
@@ -775,58 +787,77 @@ J_mle = expected_return(Q_mle, p_true, r_true, alpha=config["alpha"])
 print("MLE Return:", J_mle)
 print("OMD-IFT Return:", returns_omd[-1])
 
-# Calibration phase
-converged_at = find_convergence_point(
-    returns_omd,
-    window=config["convergence_window"],
-    eps=config["convergence_eps"],
-)
-
-transitions, r_theta_cal, p_theta_cal = collect_calibration_transitions(
-    theta_omd,
-    Q_final,
-    kappa,
-    n_states,
-    n_actions,
-    n_transitions=config["calibration_n_transitions"],
-    gamma=config["gamma"],
-    alpha=config["alpha"],
-    rng=np.random.default_rng(config["seed"] + 1),
-)
-
-residuals = compute_calibration_residuals(
-    transitions,
-    Q_final,
-    p_true,
-    r_true,
-    gamma=config["gamma"],
-    alpha=config["alpha"],
-)
-
-q_intervals = compute_q_intervals(
-    residuals,
-    Q_final,
-    alpha=config["calibration_alpha"],
-)
-
+# Calibration phase: check every b outer iterations, not only at convergence
 state_labels = [f"s{s}" for s in range(n_states)]
 action_labels = [f"a{a}" for a in range(n_actions)]
+calibration_results = []
 
-print("\n=== CALIBRATION DIAGNOSTICS ===")
-print(f"Converged at step: {converged_at} / {config['outer_max_iterations']}")
-print(f"Calibration transitions: {len(transitions)}")
-print(f"Residual mean: {np.mean(residuals):.4f}")
-print(f"Residual std:  {np.std(residuals):.4f}")
-print(f"Interval width (uniform): {q_intervals['width']:.4f}")
-print(f"q_lo: {q_intervals['q_lo']:.4f}  q_hi: {q_intervals['q_hi']:.4f}")
+print("\n=== PERIODIC CALIBRATION DIAGNOSTICS ===")
+print(f"Calibration check every: {config['calibration_check_every']} outer iterations")
+print(f"Calibration transitions/check: {config['calibration_n_transitions']}")
+print("step | J | converged_debug | residual_mean | residual_std | width | q_lo | q_hi")
 
-print("\n=== Q INTERVALS ===")
+for checkpoint in calibration_checkpoints:
+    step = checkpoint["step"]
+    theta_check = checkpoint["theta"]
+    Q_check = checkpoint["Q"]
+    J_check = checkpoint["J"]
+
+    transitions, r_theta_cal, p_theta_cal = collect_calibration_transitions(
+        theta_check,
+        Q_check,
+        kappa,
+        n_states,
+        n_actions,
+        n_transitions=config["calibration_n_transitions"],
+        gamma=config["gamma"],
+        alpha=config["alpha"],
+        rng=np.random.default_rng(config["seed"] + step),
+    )
+
+    residuals = compute_calibration_residuals(
+        transitions,
+        Q_check,
+        p_true,
+        r_true,
+        gamma=config["gamma"],
+        alpha=config["alpha"],
+    )
+
+    q_intervals = compute_q_intervals(
+        residuals,
+        Q_check,
+        alpha=config["calibration_alpha"],
+    )
+
+    recent_returns = returns_omd[:step]
+    converged_debug = False
+    if len(recent_returns) > config["convergence_window"]:
+        recent_diffs = np.abs(np.diff(recent_returns[-config["convergence_window"]:]))
+        converged_debug = np.all(recent_diffs < config["convergence_eps"])
+
+    calibration_results.append({
+        "step": step,
+        "J": J_check,
+        "converged_debug": converged_debug,
+        "residuals": residuals,
+        "q_intervals": q_intervals,
+        "Q": Q_check,
+    })
+
+    print(f"{step:4d} | {J_check:.4f} | {str(converged_debug):>15s} | "
+          f"{np.mean(residuals): .4f} | {np.std(residuals): .4f} | "
+          f"{q_intervals['width']:.4f} | {q_intervals['q_lo']:.4f} | {q_intervals['q_hi']:.4f}")
+
+latest = calibration_results[-1]
+q_intervals = latest["q_intervals"]
+Q_check = latest["Q"]
+
+print("\n=== FINAL CHECKPOINT Q INTERVALS ===")
+print(f"Checkpoint step: {latest['step']}")
 for s in range(n_states):
     for a in range(n_actions):
         lo = q_intervals["lower"][s, a]
         hi = q_intervals["upper"][s, a]
-        q = Q_final[s, a]
+        q = Q_check[s, a]
         print(f"  {state_labels[s]},{action_labels[a]}: [{lo:.3f}, {hi:.3f}]  (Q*={q:.3f})")
-
-if converged_at == config["outer_max_iterations"] - 1:
-    print("WARNING: convergence fallback — consider increasing outer_max_iterations")
