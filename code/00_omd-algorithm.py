@@ -14,10 +14,8 @@
 #     name: python3
 # ---
 
-
 # %% [code]
 import numpy as np
-
 
 def stable_logsumexp_alpha(values, alpha):
     max_value = np.max(values)

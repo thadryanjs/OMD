@@ -1,7 +1,20 @@
-# Ignore all files
-*.*
+# Ignore everything at the repo root...
+/*
+# ...except these
+!.gitignore
+!/code/
+!/math/
+!/scripts/
 
-# But keep these specific files at any level of nestedness
+# Inside the kept dirs: ignore all files, but keep descending into subdirs
+code/**
+math/**
+scripts/**
+!code/**/
+!math/**/
+!scripts/**/
+
+# Track only these extensions, at any depth inside the kept dirs
 !**/*.R
 !**/*.py
 !**/*.md
@@ -11,17 +24,15 @@
 !**/*.yml
 !**/*.toml
 !**/*.lock
-!.gitignore
+!**/.gitignore
 
-# pixi environments
-# .pixi
-*.egg-info
-# pixi environments
-# .pixi/*
-!.pixi/config.toml
-!_log.out
-# MyST build outputs
-_build
-# pixi environments
-.pixi/*
-!.pixi/config.toml
+# Re-ignore junk as whole directories (nothing inside gets tracked)
+code/outputs/
+code/.pytest_cache/
+code/.ruff_cache/
+**/*.egg-info/
+
+# .pixi is ignored EXCEPT one file:
+# ignore its *contents*, not the dir itself, so the file can be rescued
+code/.pixi/*
+!code/.pixi/config.toml
